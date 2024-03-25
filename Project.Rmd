@@ -1,0 +1,786 @@
+---
+title: '(W24) PSTAT 131: Taylor Swift Spotify/Musixmatch Project'
+subtitle: 'An Unsupervised Learning Model & Text Analysis on Lyrical Data'
+author: "Anthony Cu"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE,
+                      warning = FALSE,
+                      comment = NA)
+
+library(tidyverse)
+library(tidymodels)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(naniar)
+library(quanteda)
+library(quanteda.textstats)
+library(wordcloud)
+library(kableExtra)
+# spotify packages
+library(ggridges)
+library(spotifyr)
+# tidying data packages
+library(stopwords) # stopwords
+library(SnowballC) # word stems
+library(tm)
+library(tokenizers)
+# clustering
+library(tidyclust)
+library(GGally)
+
+Sys.setenv(SPOTIFY_CLIENT_ID = '90eebf23819f4f6a9a3c6b26f8ebedd2')
+Sys.setenv(SPOTIFY_CLIENT_SECRET = 'b17dc3bbb1744a0f9bb0a5725cbcae07')
+
+# spotify access token
+access_token <- get_spotify_access_token()
+
+# musixmatch access token
+api_key <- '86c81cb48352f6946ef78b43cbe61ad9'
+
+# set seed for dataset previews 
+set.seed(13)
+```
+
+# Introduction
+Any 'Swiftie' would be able to name the title of a Taylor Swift track just by listening to a few first seconds of it. I targeted whether a machine could do so if trained to be a Swiftie. However, to ease this task, I proposed to test whether I could have my machine predict the theme of a Taylor Swift song.
+
+**The goal of this project is to build a machine learning model that can predict the theme of a Taylor Swift song based on frequently used words in only the first 30% of lyrics.** Using data from Spotify API and Musixmatch API, where Spotify obtains its lyrical data, and implementing multiple techniques to yield the most accurate model for this unsupervised machine learning project, let's dive into our text analysis. 
+
+## Background Information
+As Spotify's Global Artist of 2023, researching Taylor Swift data on Spotify seemed extremely pertinent, especially with her current, ongoing Eras Tour that has become the highest-grossing tour of all time, surpassing $1 billion in revenue. Renowned as one of the most successful artists of the 21st century, Swift is known for influencing the music industry by crossing genres: country, pop, alternative rock, indie folk, and electronic; challenging the industry norm (such as removing her Spotify catalog in 2013 to urge the platform in paying its artists more per stream); and her unmatchable artistry and lyricism. 
+
+In 2019, Swift came in dispute with her former record label, leading her to re-record her first six studio albums: **Taylor Swift**, **Fearless**, **Speak Now**, **RED**, **1989** and **reputation**. Since 2021, Swift began her re-recording journey with **Fearless (Taylor's Version)**, in which her re-recorded albums and songs are now retitled with *(Taylor's Version)* along with cut songs that she did not release at the time denoted as *(From The Vault)* tracks. Her re-recordings have been critically acclaimed and broken countless sales, streaming, and chart records, especially with the latest re-record **1989 (Taylor's Version)**. 
+
+```{r image1, echo=FALSE, out.width='50%'}
+knitr::include_graphics(path = 'taylorswift1.jpg')
+knitr::include_graphics(path = 'spotifylogo.png')
+```
+
+## Motive
+I intend to study Swift's owned discography in my project (with the exception of **Taylor Swift** and **reputation** which have not been released at the time of the project) within Spotify/Musixmatch's catalog.
+
+```{r image2, echo=FALSE, fig.align='center', out.width='85%'}
+knitr::include_graphics(path = 'tscovers.jpeg')
+```
+
+# What Dataset?
+I will be creating a dataset from data from [Spotify API for Developers](https://developer.spotify.com/documentation/web-api) to analyze Swift's discography and [Musixmatch API](https://developer.musixmatch.com/) to extract Swift's song lyrics for each corresponding track. I will be performing machine learning on Musixmatch API to analyze Swift's lyrics and musicality. **Disclaimer**: *In accordance with Spotify Developer Policy, no Spotify Platform nor Spotify Content was used to train a machine learning or AI model nor ingested into a machine learning or AI model*
+
+## Data Collection
+### Spotify API
+The Spotify Web API provides a range of functionality for developers, such as the ability to retrieve data from artists, albums or shows; search for Spotify content; and so forth. Using the `spotifyr` package, I can search for and extract all tracks (including albums and singles) on Spotify with Swift listed as the artist through the `get_artist_audio_features()` function. 
+
+Further, Spotify's API enables me access to sound features such as: `danceability`, `energy`, `key`, `loudness`, `mode`, `speechiness`, `acousticness`, `instrumentalness`, `liveness`, etc. for each track.
+
+#### Song Selection
+Using Spotify's catalog as of January 2024, we browse through Swift's singles and albums on Spotify. We will analyze all distinct songs that Swift own: *Taylor's Version* if possible and not including remixes.
+
+When filtering our the songs, we choose all songs post 2017 (i.e after the release of **reputation**), in which Swift began owning and reclaiming her catalogue. A condition on album release date to include her debut album, released in 2006, was also included since it has yet to be re-recorded. Further, we select only the studio recording of songs that may have been released in alternate formats or live editions, such as the *Folklore Long Pond Studio Sessions* or *Lover Live From Paris*. In addition, we filter out remixes, singles, acoustic/piano versions, etc. Some alternative versions of songs are included, however, such as the multiple variations of *All Too Well*, *Snow on the Beach*, or *the lakes*. 
+```{r TScatalog}
+ts_albums <- get_artist_audio_features(artist = 'taylor swift',
+                                include_groups = "album")
+
+ts_singles <- get_artist_audio_features(artist = 'taylor swift',
+                                include_groups = "single")
+
+ts_discography <- full_join(ts_albums %>%
+  select(track_name, track_number, album_name, album_type, album_release_date, 
+         danceability, energy, key, loudness, mode, speechiness, 
+         acousticness, instrumentalness, liveness, valence, tempo,
+         time_signature, key_mode, duration_ms, explicit), 
+  ts_singles %>%
+  select(track_name, track_number, album_name, album_type, album_release_date, 
+         danceability, energy, key, loudness, mode, speechiness, 
+         acousticness, instrumentalness, liveness, valence, tempo,
+         time_signature, key_mode, duration_ms, explicit)) %>%
+  arrange(desc(album_release_date)) 
+```
+
+```{r filtering Spotify data}
+ts <- ts_discography %>%
+  filter(album_release_date > '2017-11-09' | album_release_date == '2006-10-24' |
+           track_name == 'Sweeter Than Fiction - From "One Chance" Soundtrack') %>%
+  filter(album_name != 'Spotify Singles' & !grepl('witch', album_name) & !grepl('Remix', track_name) & !grepl('the long pond studio sessions', track_name) & !grepl('Live From Paris', track_name) & !grepl('Video Edition', track_name) & !grepl('Live from the 2020 Academy of Country Music Awards', track_name) & !grepl('Recorded Live at the 2019 iHeartRadio Jingle Ball', track_name) & !grepl('cabin in candlelight version', track_name) & !grepl('Love Story - Pop Mix', track_name) & !grepl('Sawyr And Ryan Tedder Mix', track_name) & !grepl("willow - 90's trend remix", track_name) & !grepl('Acoustic Version', track_name) & !grepl('Piano', track_name)) %>%
+  distinct(track_name, .keep_all = T)
+
+ts[ts$album_name == 'folklore: the long pond studio sessions (from the Disney+ special) [deluxe edition]', 'album_name'] <- 'folklore (deluxe version)'
+```
+
+A preview of the Spotify API dataset is shown below:  
+```{r preview ts dataset, echo = F}
+knitr::kable(sample_n(ts, 13), col.names = gsub("[.]", " ", names(ts))) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "100%", height = "350px")
+```
+
+### Musixmatch API
+The Musixmatch API allows developers to read objects from their licesnced, lyrics database. After creating an access token to request Musixmatch's API, I retrieve starter code from [fernandabruno/musixmatchR](https://github.com/fernandabruno/musixmatchR) on Github to help me extract the data. Here I create two helper functions: `searchTrack()` and `getLyrics()` which will respectively retrieve the unique Musixmatch track IDs for an artist's songs and then access the lyrics to that corresponding ID.
+```{r searchTrack function}
+searchTrack <- function(artist, songName, api_key) {
+  require(jsonlite)
+  artist <- gsub(" ", "%20", artist)
+  song <- gsub(" ", "%20", songName)
+  data <- jsonlite::fromJSON(paste0(
+    "http://api.musixmatch.com/ws/1.1/track.search?q_artist=", artist, "&q_track=", song, "&apikey=", api_key))
+  
+  trackInfo <- data.frame(track_id = unlist(data$message$body$track_list$track$track_id),
+                       track_name = data$message$body$track_list$track$track_name,
+                       album_name = data$message$body$track_list$track$album_name,
+                       album_id = data$message$body$track_list$track$album_id,
+                       artist_name = data$message$body$track_list$track$artist_name,
+                       explicit = data$message$body$track_list$track$explicit,
+                       stringsAsFactors = FALSE)
+  return(trackInfo)
+} #end
+```
+
+```{r getlyrics function}
+getLyrics <- function(trackID, api_key){
+  require(jsonlite)
+  metadata <- jsonlite::fromJSON(paste0(
+    "http://api.musixmatch.com/ws/1.1/track.lyrics.get?track_id=", trackID, "&apikey=", api_key))
+
+tracks <- data.frame(track_id = trackID,
+                     lyrics_body = gsub("[\r\n]", " ",  metadata$message$body$lyrics$lyrics_body))
+  return(tracks)
+} # end
+```
+
+To extract the Musixmatch lyrics with my helper functions, I need to rely on the `track_id` information for each track, as designated by Musixmatch. I create a data frame `test` which will contain all of the track names and track ID's in Musixmatch's catalog. 
+
+In addition, Musixmatch's catalog includes piano covers and instrumental versions of Taylor Swift songs; such inclusions requires filtering and using the `distinct()` function to select the specific songs only. In addition, select songs need direct handling due to their particular naming convention in Musixmatch- which we respond to by adding them to our dataset manually. After garnering Swift's 219 songs, I use the `getLyrics()` function in order to extract the lyrics for each corresponding track id. 
+
+```{r extracting Musixmatch API lyrics, results = F, eval = F}
+# We create a `test` data frame which holds all of the track names and track id's in Musixmatch's catalog
+test <- data.frame()
+for (i in ts$track_name) {
+  test <- rbind(test, searchTrack('taylor swift', i, api_key))
+}
+
+# We check what tracks are stored with different naming conventions between the two datasets
+test %>%
+  filter(!(track_name %in% ts$track_name)) %>%
+  distinct(track_name)
+
+# we filter out the repeated track titles (and also songs in Musixmatch that are covers or instrumental versions which we don't want to consider)
+test <- test %>%
+  filter((track_name %in% ts$track_name)) %>%
+  distinct(track_name, .keep_all = T) 
+
+test <- test %>% 
+  rbind(test, searchTrack('taylor swift', 'Sweeter Than Fiction', api_key)) %>% 
+  rbind(test, searchTrack('taylor swift', "it's time to go (bonus track)", api_key)) %>% 
+  rbind(test, searchTrack('taylor swift', "right where you left me (bonus track)", api_key)) %>% 
+  rbind(test, searchTrack('taylor swift', "Only The Young (Featured in Miss Americana)", api_key)) %>% 
+  rbind(test, searchTrack('taylor swift', "'tis the damn season", api_key)) %>% 
+  rbind(test, searchTrack('taylor swift', "Lavender Haze (Felix Jaehn Remix)", api_key)) %>% 
+  rbind(test, searchTrack('taylor swift', "Nothing New (Taylor's Version) (From The Vault) [feat. Phoebe Bridgers]", api_key)) %>% 
+  rbind(test, searchTrack('taylor swift', "I Bet You Think About Me (Taylor's Version) (From The Vault) [feat. Chris Stapleton]", api_key)) %>% 
+  distinct(track_name, .keep_all = T) %>% 
+  filter(track_id != 269664185 & track_id != 253984170) %>% 
+  filter(track_id != 258853439 & track_id != 226322338 & track_id != 258853440)
+
+# we use our getLyrics() function to find the lyrics using the track_id in our `test` dataset 
+lyrics <- data.frame()
+for (i in test$track_id) {
+  lyrics <- rbind(lyrics, getLyrics(i, api_key))
+}
+```
+
+```{r print preview, echo = F, eval = F}
+knitr::kable(head(test, 6)) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "100%", height = "350px")
+knitr::kable(head(lyrics, 6)) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "100%", height = "350px")
+```
+
+## Data Creation
+Having two different datasets, `test` and `lyrics` for the track names and lyrics, I can merge the Musixmatch data together into one dataset on `track_id`. Afterwards, I want to combine this newly merged `lyrics` dataset with the `ts` dataset from Spotify API. 
+
+However, there exists some differences in naming conventions of track titles between Spotify and Musixmatch, such as differences in how to label featured artists, whether using `()` or `[]` for example. In adherence with how the track names are displayed on Spotify, I explicitly rename the titles in the lyrics data frame, e.g. *Electric Touch (Taylor's Version) (From The Vault) [feat. Fall Out Boy]* or *Run (Taylor's Version) (From The Vault) [feat. Ed Sheeran]*.
+
+Having the track names be consistent between the datasets, I can merge on the track name and now have one singular dataset: `official_list` which will have the following inputs: `track_name`, `album_name`, `track_number`, `lyrics`, and `length`. I store this compiled dataset as a .csv file for convenience of analysis repetition. 
+```{r merging our datasets, results = F, eval = F}
+# we merge test and lyrics
+lyrics <- merge(lyrics, test, by = 'track_id')
+
+# we check the naming conventions between each dataset
+lyrics %>%
+  filter(!(track_name %in% ts$track_name))
+ts %>%
+  filter(!track_name %in% lyrics$track_name)
+
+# we fix the naming conventions (we adhere to the names that they are given in the Spotify catalog)
+lyrics[lyrics$track_name == "Electric Touch (Taylor’s Version) (From The Vault) [feat. Fall Out Boy]", 'track_name'] <- "Electric Touch (feat. Fall Out Boy) (Taylor’s Version) (From The Vault)"
+lyrics[lyrics$track_name == "Castles Crumbling (Taylor’s Version) (From The Vault) [feat. Hayley Williams]", 'track_name'] <- "Castles Crumbling (feat. Hayley Williams) (Taylor’s Version) (From The Vault)"
+lyrics[lyrics$track_name == "Run (Taylor's Version) (From The Vault) [feat. Ed Sheeran]", 'track_name'] <- "Run (feat. Ed Sheeran) (Taylor’s Version) (From The Vault)"
+lyrics[lyrics$track_name == "I Bet You Think About Me (Taylor's Version) [From The Vault] [feat. Chris Stapleton]", 'track_name'] <- "I Bet You Think About Me (feat. Chris Stapleton) (Taylor’s Version) (From The Vault)"
+lyrics[lyrics$track_name == "Nothing New (Taylor's Version) (From The Vault) [feat. Phoebe Bridgers]", 'track_name'] <- "Nothing New (feat. Phoebe Bridgers) (Taylor’s Version) (From The Vault)"
+lyrics[lyrics$track_name == "Everything Has Changed (Taylor's Version) [feat. Ed Sheeran]", 'track_name'] <- "Everything Has Changed (feat. Ed Sheeran) (Taylor’s Version)"
+lyrics[lyrics$track_name == "The Last Time (Taylor's Version) [feat. Gary Lightbody]", 'track_name'] <- "The Last Time (feat. Gary Lightbody of Snow Patrol) (Taylor’s Version)"
+lyrics[lyrics$track_name == "it's time to go (bonus track)", 'track_name'] <- "it’s time to go - bonus track"
+lyrics[lyrics$track_name == "right where you left me (bonus track)", 'track_name'] <- "right where you left me - bonus track"
+lyrics[lyrics$track_name == "'tis the damn season", 'track_name'] <- "‘tis the damn season"
+lyrics[lyrics$track_name == "Only The Young (Featured in Miss Americana)", 'track_name'] <- "Only The Young - Featured in Miss Americana"
+lyrics[lyrics$track_name == "Sweeter Than Fiction", 'track_name'] <- 'Sweeter Than Fiction - From "One Chance" Soundtrack'	
+lyrics[lyrics$track_name == "Lavender Haze (Felix Jaehn Remix)", 'track_name'] <- 'Lavender Haze'
+lyrics[lyrics$track_name == "	
+Message In A Bottle (Taylor's Version) [From The Vault]", 'track_name'] <- "Message In A Bottle (Taylor's Version) (From The Vault)"
+lyrics[lyrics$track_name == "Forever Winter (Taylor's Version) [From The Vault]", 'track_name'] <- "Forever Winter (Taylor's Version) (From The Vault)"
+
+# we finally curate our official taylor swift catalog, with the track name, album name, track number, lyrics, and length
+official_list <- merge(lyrics, ts, by = 'track_name') %>%
+  select('track_name', 'album_name.y', 'track_number', 'lyrics_body', 'duration_ms')
+```
+
+About `official_list` (more information in codebook):
+
+* `track_name`: the title of the song
+* `album_name`: the title of the album, extended play, compilation, etc. that the track derives from
+* `track_number`: the number of the song in its album, extended play, compilation, etc. (note that if the track is a single, the track number is just 1)
+* `lyrics`: the first 30% of the song lyrics from Musixmatch's API dataset (the dataset only provdes 30% of lyrics for non-subscription users)
+* `length`: the time duration of the song in milliseconds 
+
+A preview of our dataset: 
+```{r preview dataset, echo = F}
+official_list <- read.csv("~/Desktop/Project/official_list.csv")
+official_list <- official_list[,-1]
+knitr::kable(sample_n(official_list, 13)) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "100%", height = "400px")
+```
+
+# Exploratory Data Analysis
+Because our dataset was manually curated, there exists no missing data.
+```{r missing data}
+vis_miss(official_list)
+```
+
+## Eras Visualizations 
+We explore Swift's musical catalog through her different eras (a loose term for her albums, but including songs that were not included in the album but released around the same time).
+```{r EDA}
+ggplot(official_list %>% 
+  mutate(era = ifelse("Taylor Swift" == official_list$album_name.y, "Self-titled", ifelse(grepl("Fearless", official_list$album_name.y), "Fearless", 
+  ifelse(grepl("Speak Now", official_list$album_name.y), "Speak Now",  
+  ifelse(grepl("Red", official_list$album_name.y) | grepl("Message In A Bottle", official_list$album_name.y) | grepl("All Too Well", official_list$album_name.y), "RED", 
+  ifelse(grepl("1989", official_list$album_name.y) | grepl("Sweeter Than Fiction", official_list$album_name.y), "1989",
+  ifelse(grepl("reputation", official_list$album_name.y), "reputation", 
+  ifelse(grepl("Christmas Tree Farm", official_list$album_name.y) | grepl("Lover", official_list$album_name.y) | grepl("Americana", official_list$album_name.y) | grepl("The Cruelest Summer", official_list$album_name.y) | grepl("All Of The Girls You Loved Before", official_list$album_name.y), "Lover", 
+  ifelse(grepl("folklore", official_list$album_name.y) | grepl("Carolina", official_list$album_name.y) | grepl("the lakes", official_list$album_name.y) | grepl("Renegade", official_list$album_name.y), "folklore", 
+  ifelse(grepl("evermore", official_list$album_name.y) | grepl("The Joker And The Queen", official_list$album_name.y), "evermore",  
+         ifelse(grepl("Midnights", official_list$album_name.y) | grepl("You're Losing Me", official_list$album_name.y) | grepl("Anti-Hero", official_list$album_name.y), "Midnights", NA))))))))))) %>% 
+  mutate(era = factor(era, levels = c("Self-titled", "Fearless", "Speak Now", "RED", "1989", "reputation", "Lover", "folklore", "evermore", "Midnights"))) %>% 
+  arrange(era), aes(x= era, fill = era)) +
+  geom_bar(stat = "count") + 
+  theme_linedraw() + 
+  theme(axis.ticks.x = element_blank(), axis.ticks.y = element_blank(), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 0.5), legend.position = "none") + 
+  scale_y_continuous(expand=c(0,0)) +
+  scale_x_discrete(labels = c("Self-titled", "Fearless", "Speak Now", "RED", "1989", "reputation", "Lover", "folklore", "evermore", "Midnights")) +
+  scale_fill_manual(values = c("#b9d2b5", "#f4cb8d", "#d1b2d2", "#823549", "#b5e9f6", "#847e80", "#f9b2d0", "#cfcac6", "#c8ae95", "#434961")) +
+  labs(title = "Taylor Swift Songs per Era", x = "Era",
+       y = element_blank()) +
+  coord_flip()
+```
+
+With this visualization, we can see that her *RED* era featured the most songs. An album with a plethora of songs- including *All Too Well* about heartbreak or *22* about embracing independence and change, each individual era is not defined by a single theme or topic. This helps us see the challenge of the task we're taking on- every era has a mix of different things to sing along to. 
+
+## Text Analysis on Lyrics
+Let's get to the lyrics! 
+
+I create a `lyricFreq()` function in order to determine the most frequent words in each songs. 
+
+Because each lyric from Musixmatch ends with a disclaimer message, I account for the string until the *...* character. Following, I filter out symbols and punctuation points. To begin our text analysis, I account for *stopwords* and *stemming*. Using the `SnowballC` package, I am able to use the predefined dictionary of stopwords and stemmed words. However, since some of Swift's songs are dependent on 'stem words,' I exclude a selected few: 'me/mine', 'our', 'your', etc.
+```{r lyricFreq}
+ts_stopwords <- as_tibble(stopwords::stopwords(source = 'snowball')) %>%
+  filter(!(value %in% c("me", "our", "ours", "your", "did", "would", "could", "should", "before", "after", "between", "against", "above", "below", "up", "down", "again", "why", "only", "same", "too", "will", "myself")))
+
+lyricFreq <- function(index) {
+  # this is to find when the lyrics end so we don't have to deal with the copyright message
+  end <- which(strsplit(official_list$lyrics_body[index], split = ' ')[[1]] == "...")
+  # to split up the lyric text by word 
+  rv <- strsplit(tolower(official_list$lyrics_body[index]), split = ' ')[[1]][1:(end-1)] 
+  rv <- gsub('[,()"!?]', '', rv)
+
+  # this is a data frame of all the frequent words (in order)
+  #return(count(rv)[order(count(rv)$freq, decreasing = T),])
+  return(as_tibble(rv) %>%
+  filter(!(value %in% as.vector(ts_stopwords)$value)) %>%
+  mutate(stem = wordStem(value)) %>%
+  count(stem) %>%
+  arrange(desc(n)))
+}
+```
+
+We run the lyrics and analysis for selected songs:
+
+* *Say Don't Go (Taylor's Version)*, **1989 (Taylor's Version)**
+
+```{r lyricFreq example1}
+official_list$lyrics_body[153]
+
+knitr::kable(lyricFreq(153)) %>% 
+  kable_styling(full_width = T) %>% 
+  scroll_box(width = "30%", height = "200px")
+
+wordcloud(words = lyricFreq(153)$stem, 
+          freq = lyricFreq(153)$n, 
+          min.freq = 1,
+          max.words = 200,
+          colors = brewer.pal(8, "Dark2"))
+```
+
+* *You're Losing Me*, **Midnights (The Late Night Edition)**
+
+```{r lyricFreq example2}
+official_list$lyrics_body[218]
+
+knitr::kable(lyricFreq(218)) %>% 
+  kable_styling(full_width = T) %>% 
+  scroll_box(width = "30%", height = "200px")
+
+wordcloud(words = lyricFreq(218)$stem, 
+          freq = lyricFreq(218)$n, 
+          min.freq = 2,
+          max.words = 200,
+          colors = brewer.pal(3, "Dark2"))
+```
+
+* *All Too Well (10 Minute Version) (Taylor's Version) (From The Vault)*, **RED (Taylor's Version)**
+
+```{r lyricFreq example3}
+official_list$lyrics_body[9]
+
+knitr::kable(lyricFreq(9)) %>% 
+  kable_styling(full_width = T) %>% 
+  scroll_box(width = "30%", height = "200px")
+
+wordcloud(words = lyricFreq(9)$stem, 
+          freq = lyricFreq(9)$n, 
+          min.freq = 1,
+          max.words = 200,
+          colors = brewer.pal(8, "Set1"))
+```
+
+This function helps me identify what keywords are commonly used in Swift's songs, in order for me to produce a more precise dictionary.
+
+## Creating a Dictionary
+I create a dictionary for the different themes of Swift's songs: **love**, **heartache/pain**, **growing up/change**, and **self-reflection/reputation**. By listening to her music, I generalized her tracks into these common themes. For instance, *Enchanted (Taylor's Version)* which is about a new crush would be categorized as a love song. On the other hand, *Anti-Hero* which details how she views herself in response to her publicity, would be about reflection/reputation. Noticing common words that she would sing in her songs as well as using our EDAs, I curated the dictionary terms with her frequently used jargon.
+
+To create my dictionary for the **love** theme, I referenced song lyrics such as: "Romeo, take me somewhere we can be alone / I'll be waiting, all that's left to do is run" from *Love Story (Taylor's Version)*, "If you could see that I'm the one who understands you / Been here all along, so why can't you see?" from *You Belong With Me (Taylor's Version)*, "This night is sparkling, don't you let it go / I'm wonderstruck, blushing all the way home" from *Enchanted (Taylor's Version)*, "Drop everything now, meet me in the pouring rain / Kiss me on the sidewalk, take away the pain" from *Sparks Fly (Taylor's Version)*, "He's so tall and handsome as hell / He's so bad, but he does it so well" from *Wildest Dreams (Taylor's Version)*, and "One night, he wakes, strange look on his face / Pauses, then says, 'You're my best friend.' / And you knew what it was, he is in love" from *You Are In Love (Taylor's Version)*. 
+
+To create my dictionary for **pain**, I reference song lyrics such as: "So this is me swallowing my pride, standing in front of you, saying I'm sorry for that night" from *Back to December (Taylor's Version)*, "So I'll watch your life in pictures like I used to watch you sleep / And I feel you forget me like I used to feel you breathe" from *Last Kiss (Taylor's Version)*, "If you tasted poison, you could've / Spit me out at the first chance / If I was some paint, did it splatter / On a promising grown man?" from *Would've, Could've, Should've*, and "Because I dropped your hand while dancing / Left you out there standing / Crestfallen on the landing" from *champagne problems*. 
+
+To create my dictionary for **change**, I referenced song lyrics such as: "Like any great love, it keeps you guessing / Like any real love, it's ever-changing" from *Welcome to New York (Taylor's Version)*, "I've been the archer / I've been the prey / Who could ever leave me, darling?" from *The Archer*, or "Back then I swore I was gonna marry him someday / But I realized some bigger dreams of mine" from *Fifteen (Taylor's Version)*.
+
+To create my dictionary for **reflection**, I referenced song lyrics such as: "I'm so sick of running as fast as I can / Wondering if I'd get there quicker / If I was a man" from *The Man* or "Everybody's waiting for you to break down / Everybody's watching to see the fallout" from *Eyes Open (Taylor's Version)*.
+```{r manual dictionary, class.source = 'fold-show'}
+myDict <- dictionary(list(love = c('love*', 'girl*', 'forev*', 'light*', 'first', 'summer', 'time', 'friend', 'eye', 'see', 'bab*', 'romeo', 'run', 'one', 'spark*', 'wonder*', 'enchant*', 'handsom*', 'best', 'daydream', 'treacherous', 'fearless', 'style', 'grin*', 'electr*', 'flawless', 'hand', 'craz*', 'favorit*', 'lip*', 'blind', 'book', 'pac*', 'town', 'sunshin*', 'dress', 'breez', 'dream', 'fairytal*', 'save', 'tall', 'somedai', 'smile', 'laugh', 'togeth', 'spark', 'belong', 'girlfriend', 'red', 'invisib*', 'begin', 'wild*', 'magic*', 'timeless', 'boy*', 'wildest', 'heaven', 'sunset', 'arms', 'different', 'silence', 'sweet', 'skin', 'high', 'angel', 'glow', 'shape', 'bad', 'ring'),
+                          pain = c('remember', 'never', 'lost', 'lose', 'losin*', 'forget', 'dead', 'cruel', 'fall', 'right', 'wait', 'sorry', 'swallow', 'blurry', 'worth', 'breathe', 'gray', 'shade', 'away', 'sad', 'tragic', 'tear*', 'richochet', 'last', 'stream*', 'mess*', 'cri*', 'paralyz*', 'kill*', 'exile', 'trouble', 'problem*', 'final', 'champagn', 'crestfallen', 'worst', 'infidel', 'broken', 'regret', 'wound', 'ghost', 'poison', 'scare', 'weapon', 'pain', 'reveng', 'fake', "ain't", "should'v", 'perfectli', 'apart', 'sign', 'complic', 'break', 'broke', 'empti', 'speak', 'haunt*', 'last', 'breakd*', 'think', 'mcgraw', 'fade', 'shame', 'toler*', 'better', 'desper*', "could'v", "would'v", 'apologi*', 'door', 'fight', 'god', 'screaming', 'woods', 'sad', 'without', 'tire*', 'called', 'car', 'wash', 'stupid', 'anymor', 'storm'),
+                          change = c('face', 'year*', 'change', 'happi', 'free', 'confus*', 'same', 'revolution', 'chance', 'day*', 'grow', 'grew', 'young', 'littl*', 'guess*', 'live', 'pretend', 'york', 'welcom', 'waitin*', 'danc*', 'forevermor', 'loud', 'ash', 'best', 'fireplac*', 'learn', 'sprinkler', 'know', 'year', 'new', 'proud*', '22', 'alright', 'crowd', 'creek', 'pennsylvania', 'innoc*', 'balanc*', 'bigger', 'combat', 'easi*', 'archer', 'win', 'darl*', 'shake', 'peopl*', 'world', 'city'),
+                          reflection = c('hero', 'reputation', 'dynasti', 'power', 'play*', 'man', 'rude', 'mirrorball', 'version', 'believe', 'natural', 'try', 'empir', 'bridg*', 'castle*', 'watch', 'everybod*', 'fallout', 'kill', 'proof', 'woman', 'women', 'gold', 'american*', 'everybod*', 'depress*', 'anti-hero', 'game', 'underlin*', 'cynic*', 'hunter', 'peak', 'nothin*', 'karma', 'street', 'vice', 'wise*')))
+```
+
+# Preprocessing our Data
+Now, it's time to get our data ready for machine learning. To preprocess our data, we will: 
+
+1. Tokenize our text- divide the different tests into individuals words
+2. Remove stop words- remove common words that do not imply meaningful analysis
+3. Stem words- reduce a word to its root format (to recognize common words but used in various tenses)
+
+## Feature Extraction- Text Mining
+Using the `quanteda` package, I transform the data frame (i.e. a **corpus** object- **the data structure for text data before tokenization**) of lyrics into a **document-feature matrix (DFM)**. 
+
+A **DFM** is a matrix in which the elements are the counts of the features in the documents. In our project, our `features` columns represents each individual string/word that Swift uses in all her 219 songs, and each row represents a different `doc`, i.e each song. 
+
+I use `tokens()` from the `quenteda` package to break down the song lyrics into individual words (i.e. tokens). This tokenization process is a fundamental step in the *Natural Language Processing (NLP)*. I also remove the stopwords that we crafted above, change all of the words to lowercase for consistency, and remove Musixmatch's closing copyright tag. 
+
+```{r tokenize words in song lyrics, print preview}
+ts_dtm2 <- tokens(corpus(official_list$lyrics_body)) %>% 
+  tokens_remove(pattern = ts_stopwords) %>% 
+  tokens_tolower() %>% 
+  tokens_remove(pattern = c('lyrics', 'commercial', 'use', '1409624132591'))
+
+ts_dtm2 <- ts_dtm2 %>% dfm()
+```
+
+So, this is what the DFM looks like!
+```{r preview of our all words dfm, echo = F}
+knitr::kable(dfm_sample(ts_dtm2, 6)) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "100%", height = "250px")
+```
+
+It won't provide us much information until we use the `dfm_lookup()` function to cross-reference the words with my manually created Taylor Swift dictionary for the common themes. 
+```{r create the DFM by matching with dictionary}
+ts_dfm <- dfm_lookup(ts_dtm2, dictionary = myDict)
+
+ts_dfm <- ts_dfm %>% as.data.frame() %>% 
+  cbind(official_list$track_name) %>% 
+  select(-c('doc_id')) %>% 
+  select(c(5, 1:4))
+```
+
+Our useful document feature matrix: 
+```{r print dfm, echo = F}
+knitr::kable(ts_dfm) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "100%", height = "400px")
+```
+
+Taking a brief glimpse at our document feature matrix, we can notice that a good number of our songs have been accurately matched to their correct theme: *...Ready For It*, *Sl%t (Taylor's Version)*, *Call It What You Want*, *Cruel Summer*, *Don't Blame Me*, *Enchanted (Taylor's Version)* all have the highest count for love; *We Are Never Ever Getting Back Together (Taylor's Version)*, *Would've, Could've, Should've*, *You're Losing Me*, *right where you left me* all have the highest count for pain; *Change (Taylor's Version)*, *Never Grow Up (Taylor's Version)*, *New Romantics (Taylor's Version)*, *Welcome to New York (Taylor's Version)* have the highest count for change; and *Eyes Open (Taylor's Version)* has the highest for reflection. However, there are songs that have not been accurately matched to their correct theme or tied between 2 themes. For instance, *Look What You Made Me Do* or *Anti-Hero* were not assigned to the reflection theme. Since we're only interpreting the lyrics of the first 30% of the song, it could make sense for the song to fall into the love category, rather than the reflection theme, due to her use of love-related words to set up the song's narrative. In addition, *Cornelia Street* is a love song about a relationship being so good that Swift is afraid it might end; this doubled context is then interpreted as a song about pain rather than love by our dictionary of key words. 
+
+Interestingly, songs that I presumed would suit one theme but ended up falling into another theme however, still made valid sense. For instance, *Blank Space (Taylor's Version)* details Swift's love's life in response to media scrutiny, but she conveys the message through a lover's perspective- which is why it was categorized in the love theme, unlike reflection as expected. 
+
+# Building Models
+To build our unsupervised learning models, I intend to fit the following algorithms: **K-Means Clustering** and **Hierarchical (Agglomerative)**.
+
+## K- Means Clustering
+The K-means algorithm is an unsupervised learning algorithm that organizes observations into groups based on similarities. In context of our project, our algorithm organizes songs into their thematic groups. The algorithm iteratively assigns each song to its nearest cluster centroid, and then recalculates the centroids based on newly formed clusters. Initially, each centroid is placed randomly and move themselves to the center of the observations that are closer to them. The algorithm is finished when the position or the groups don't change anymore at each iteration. 
+
+### Tuning Number of Centers
+To perform K- Means clustering on our document feature matrix, I tune different numbers of groups to cluster by. To prepare this model, I do not tune my DFM since my count values are already all scaled the same way. 
+
+```{r tuning kmeans of 2}
+set.seed(13)
+kmeans(ts_dfm[,-1], centers = 2)
+```
+By performing K-means clustering with 2 centers, I result with two groups. The first cluster has no high average value for any of the themes with all of the average values ranging between 0-4. On the other hand, the second cluster has a high average value for the love theme, with an average value of 8.686. The first cluster has a size of 136 songs while the second cluster contains 83 songs.  
+
+```{r tuning kmeans of 3}
+set.seed(13)
+kmeans(ts_dfm[,-1], centers = 3)
+```
+By performing K-means clustering with 3 centers, I result with three clusters. The first cluster has no high average value for any of the cluster, consisting of 111 songs. The second group has a high average value for love, with an average value of 9.057. This cluster has 70 songs about it's theme. The third cluster has a high average value of 8.894 for pain with 38 songs.  
+
+```{r tuning kmeans of 4}
+set.seed(13)
+kmeans(ts_dfm[,-1], centers = 4)
+```
+With K-means clustering of 4 centers, I result with four groups. The first group has a high average value of 13.400 for the change category, consisting of 10 songs. The second cluster has a high average value of 8.971 for the love theme with 69 songs. The third cluster has a high average value of 9.766 for the pain theme with 30 songs. Lastly, the fourth cluster does not have any high average value for any of the four themes, consisting of 110 songs. With our 4 clusters, we develop a bracket for love songs, songs about pain/heartbreak, and songs about change. We then have one last group for songs that are undetected with any specific theme, a pattern similar to all of the other fittings we've done.
+
+Using 4 centers seems to provide a better result than the previous two results as we now develop a category for another theme in our dictionary. 
+
+```{r tuning kmeans of 5}
+set.seed(13)
+kmeans(ts_dfm[,-1], centers = 5)
+```
+With K-means clustering of 5 centers, I result with five groups. The first cluster has a high average value of 15.428 for the change theme, consisting of 7 songs. The second cluster of size 50 has a high average value for love with 9.840. The third cluster has a high average value for pain with 26 songs and an average of 10.269. The fourth cluster has a moderately high average value for love in comparison to the other themes, with an average value of 4.450, and containing 60 songs. Lastly, the fifth cluster has no high average value for any cluster and has a size of 76 songs left undetected of any specific theme. Rather than forming a category for our reflection theme, we instead develop another bracket for our love category, in which it is split between levels of strong and moderate love. 
+
+Examining the different number of centers we tuned, all models tend to result with a cluster that undetected a singular theme of a song. Pain, love, and change seem to be the most easily detected songs based on our models. Reflection is the one theme in our dictionary that has not been detected to its own cluster. Based on the results of our K-means modeling, I will proceed with `k=4` centers since it provided the most interpretable results in relation to our project goal.
+
+### Running Multiple times
+I will run K-means clustering with `k=4` centers six times, to view the different clustering assignments I can achieve. 
+```{r Kmeans clustering for 4 centers}
+set.seed(13)
+kmeans_ts1 <- kmeans(ts_dfm[,-1], centers = 4)
+kmeans_ts2 <- kmeans(ts_dfm[,-1], centers = 4)
+kmeans_ts3 <- kmeans(ts_dfm[,-1], centers = 4)
+kmeans_ts4 <- kmeans(ts_dfm[,-1], centers = 4)
+kmeans_ts5 <- kmeans(ts_dfm[,-1], centers = 4)
+kmeans_ts6 <- kmeans(ts_dfm[,-1], centers = 4)
+```
+
+```{r examining our different runs}
+kmeans_ts1$centers
+kmeans_ts2$centers
+kmeans_ts3$centers
+kmeans_ts4$centers
+kmeans_ts5$centers
+kmeans_ts6$centers
+```
+After running K-means clustering six times with 4 centers, I get that my 3/6 of my results produce the same results with same average values [`kmeans_ts2`, `kmeans_ts3`, `kmeans_ts5`]: one cluster with a high average for pain, one cluster with a high average for change, one cluster with a high average for love, and one cluster for all themes. `kmeans_ts1` produces the same pattern of clusters, but just with different average values. On the other hand, `kmeans_ts4` produces a cluster for love, pain, reflection, and one cluster for all remaining themes. This is new, since we have not seen any of our K-means clusters produce a cluster for reflection yet in our tuning process. `kmeans_ts6` produces a different pattern of results: there exists a cluster with a high average value for love (strong love) and a cluster with a moderately high value for love (moderate love). Further, the other two clusters are for pain and a cluster for all themes unspecified. 
+
+### Visualizing Results 
+I visualize these unique results with a scatterplot. With a focus on the count words for love and pain, since those have been revealed to be the most predominant features, I scale the count of love and pain dictionary words on the x- and y- axis. I then plot each song colored by what cluster group they fall into. 
+
+```{r scatterplot visuals for different visuals}
+# plot for versions: kmeans_2, kmeans_3, kmeans_5
+ggplot(cbind(ts_dfm, kmeans_ts2$cluster), aes(x = love, y = pain, color = factor(kmeans_ts2$cluster))) +
+  geom_point(size = 0.9, shape = 6) + 
+  scale_color_manual(limits = c(2, 4, 3, 1), values = c("pink", "navy", "purple", "gray"), name = "Theme", labels = c("Love", "Pain", "Change", "NA")) +
+  theme_light() + 
+  theme(axis.ticks.x = element_blank(), axis.ticks.y = element_blank(), plot.title = element_text(size=11.5, face = "bold"),     legend.position = c(1.01, 1.02),
+    legend.justification = c("right", "top"),
+    legend.box.just = "right",
+    legend.margin = margin(6, 6, 6, 6),
+    legend.text = element_text(size = 6),
+    legend.box.background = element_rect(color="black", size=0.25)) +
+  labs(title = "Frequency of Love vs Pain Words by Theme", 
+       x = "Love", y = "Pain")
+
+# plot for versions: kmeans_1
+ggplot(cbind(ts_dfm, kmeans_ts1$cluster), aes(x = love, y = pain, color = factor(kmeans_ts1$cluster))) +
+  geom_point(size = 0.9, shape = 6) + 
+  scale_color_manual(limits = c(2, 3, 1, 4), values = c("pink", "navy", "purple", "gray"), name = "Theme", labels = c("Love", "Pain", "Change", "NA")) +
+  theme_light() + 
+  theme(axis.ticks.x = element_blank(), axis.ticks.y = element_blank(), plot.title = element_text(size=11.5, face = "bold"),     legend.position = c(1.01, 1.02),
+    legend.justification = c("right", "top"),
+    legend.box.just = "right",
+    legend.margin = margin(6, 6, 6, 6),
+    legend.text = element_text(size = 6),
+    legend.box.background = element_rect(color="black", size=0.25)) +
+  labs(title = "Frequency of Love vs Pain Words by Theme", 
+       x = "Love", y = "Pain")
+
+# plot for versions: kmeans_4
+ggplot(cbind(ts_dfm, kmeans_ts4$cluster), aes(x = love, y = pain, color = factor(kmeans_ts4$cluster))) +
+  geom_point(size = 0.9, shape = 6) + 
+  scale_color_manual(limits = c(1, 3, 2, 4), values = c("pink", "navy", "gold", "gray"), name = "Theme", labels = c("Love", "Pain", "Reflection", "NA")) +
+  theme_light() + 
+  theme(axis.ticks.x = element_blank(), axis.ticks.y = element_blank(), plot.title = element_text(size=11.5, face = "bold"),     legend.position = c(1.01, 1.02),
+    legend.justification = c("right", "top"),
+    legend.box.just = "right",
+    legend.margin = margin(6, 6, 6, 6),
+    legend.text = element_text(size = 6),
+    legend.box.background = element_rect(color="black", size=0.25)) +
+  labs(title = "Frequency of Love vs Pain Words by Theme", 
+       x = "Love", y = "Pain")
+
+# plot for version: kmeans_6
+ggplot(cbind(ts_dfm, kmeans_ts6$cluster), aes(x = love, y = pain, color = factor(kmeans_ts6$cluster))) +
+  geom_point(size = 0.9, shape = 6) + 
+  scale_color_manual(limits = c(1, 2, 4, 3), values = c("pink", "maroon", "navy", "gray"), name = "Theme", labels = c("Strong Love", "Moderate Love", "Pain", "NA")) +
+  theme_light() + 
+  theme(axis.ticks.x = element_blank(), axis.ticks.y = element_blank(), plot.title = element_text(size=11.5, face = "bold"),     legend.position = c(1.01, 1.02),
+    legend.justification = c("right", "top"),
+    legend.box.just = "right",
+    legend.margin = margin(6, 6, 6, 6),
+    legend.text = element_text(size = 6), 
+    legend.box.background = element_rect(color="black", size=0.25)) +
+  labs(title = "Frequency of Love vs Pain Words by Theme", 
+       x = "Love", y = "Pain")
+```
+
+Interpreting the change amongst the plots, the most detectable change between the first two plots is that one single love song becomes a change song, implying how the second iteration of K-means clustering collected more change songs. The shift to the third plot shows the development of undetected songs into reflection songs, as well as more pain songs being identified from the undetected population. Lastly, the fourth plot shows how the centered love songs are now classified as moderate love, as their count for love words are not as high in comparison to the other songs in their theme. 
+
+## Hierarchical Clustering
+Let's try something else. Hierarchical clustering is an unsupervised method for clustering observations. It is an alternative approach to K-Means clustering because it does not require a pre-specified number of clusters. There are two types of hierarchical clustering algorithms: agglomerative clustering and divisive hierarchical clustering.
+
+Agglomerative clustering is more appropriate for this project because it starts with individual data points as clusters and progressively merge them, which can be computationally less intensive and more intuitive. It is also flexible with the number of clusters, which we apply as the 4 themes in this case.
+
+## Agglomerative Nesting (AGNES)
+This algorithm works "bottom-up." Each observation is initially considered as a single-element cluster; at each step, the two clusters that are the most similar are combined into a new bigger cluster. This procedure is repeated until all observations are members of just one single root cluster.
+
+As we perform hierarchical clustering, we observe the dissimilarity measure between each pair of observations. As we repeat the procedure, we extend this dissimilarity to a pair of groups of observations, i.e. linkage. In my project, I consider the following types of linkage: complete (maximal intercluster dissimilarity), single (minimal intercluster dissimilarity), and average (mean intercluster dissimilarity). 
+
+### Visualizing Dendrograms
+I perform hierarchical cluster analysis with the `hclust()` function: 
+```{r agglomerative}
+# create different hierarchical clusterings
+hcluster_complete_ts <- hclust(dist(ts_dfm), method = "complete")
+hcluster_single_ts <- hclust(dist(ts_dfm), method = "single")
+hcluster_average_ts <- hclust(dist(ts_dfm), method = "average")
+```
+
+```{r plot the dendrograms}
+plot(hcluster_complete_ts, main = "Complete Linkage",
+     xlab = "", sub = "", cex = 0.17)
+plot(hcluster_single_ts, main = "Single Linkage",
+     xlab = "", sub = "", cex = .17)
+plot(hcluster_average_ts, main = "Average Linkage",
+     xlab = "", sub = "", cex = .17)
+```
+
+### Choosing Linkage type
+The `cutree()` function determines the cluster label for each observation by a given cut of the dendrogram (in this case I am cutting 4 clusters for our four themes). 
+```{r choosing best linkage type}
+cutree(hcluster_complete_ts, 4)
+cutree(hcluster_single_ts, 4)
+cutree(hcluster_average_ts, 4)
+```
+I find that the **complete** linkage hierarchical clustering provides me with the most diverse clusters, so I will utilize this type of linkage moving forward. The single and average clusters seem to cluster all songs into the same cluster (1), which could be reflective of how we saw that the majority of songs were placed in the undefined theme category in the K-means clustering. 
+
+### Tuning Number of Clusters 
+Now that I've chosen which linkage type to use, I proceed with tuning various number of clusters to see how I could best cut the tree to model my data. 
+
+#### 4 Clusters?
+To examine what the most accurate number of cuts to make, I have to look at what songs exactly are being stored in 4 clusters. Understanding the songs being put into these clusters can tell me what themes each of them are implicitly representing. 
+```{r tune agnes clusters table}
+table(cutree(hcluster_complete_ts, 4))
+```
+At a glance, I observe that cluster 1 has 25 songs, cluster 2 has the bulk of 151 songs, cluster 3 has 11 songs, and cluster 4 has 32 songs.
+
+```{r hcluster songs in cluster1}
+knitr::kable(official_list[which(cutree(hcluster_complete_ts, 4) == 1), 1]) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "30%", height = "200px")
+```
+
+```{r hcluster songs in cluster2}
+knitr::kable(official_list[which(cutree(hcluster_complete_ts, 4) == 2), 1]) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "30%", height = "200px")
+```
+
+```{r hcluster songs in cluster3}
+knitr::kable(official_list[which(cutree(hcluster_complete_ts, 4) == 3), 1]) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "30%", height = "200px")
+```
+
+```{r hcluster songs in cluster4}
+knitr::kable(official_list[which(cutree(hcluster_complete_ts, 4) == 4), 1]) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "30%", height = "200px")
+```
+
+The first cluster contains dominantly love songs, evidently by *When Emma Falls in Love (Taylor's Version)*, *Your Are In Love (Taylor's Version)*, and *Love Story (Taylor's Version)*. However, it does contain some songs that are not about love, but may have been included based on the predefined terms in our dictionary, such as *Babe* or *Bad Blood*.
+
+The second cluster contains a majority of songs, consisting of both love songs and heartbreak songs (*You Belong With Me (Taylor's Version)*, *Vigilante Shit*, etc.). I deduce this cluster is the unspecified cluster of any one particular theme.
+
+The third cluster contains an accurate depiction of the change theme: *Everything Has Changed (Taylor's Version)*, *Never Grow Up (Taylor's Version)*, *The Best Day (Taylor's Version)*. 
+
+The fourth cluster contains mostly songs about pain, with the exception of some songs (which could be due to how the dictionary was formulated): *All Too Well (10 Minute Version) (Taylor's Version)*, *Better Than Revenge (Taylor's Version)*, *Would've, Could've, Should've*, *You’re Losing Me*. 
+
+#### 5 Clusters?
+I will now try cutting the tree at 5 clusters to see how this could change our results. 
+```{r cut the tree at 5 clusters}
+cutree(hcluster_complete_ts, 5)
+table(cutree(hcluster_complete_ts, 5))
+```
+
+```{r hcluster5 songs in cluster1}
+knitr::kable(official_list[which(cutree(hcluster_complete_ts, 5) == 1), 1]) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "30%", height = "200px")
+```
+
+```{r hcluster5 songs in cluster2}
+knitr::kable(official_list[which(cutree(hcluster_complete_ts, 5) == 2), 1]) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "30%", height = "200px")
+```
+
+```{r hcluster5 songs in cluster3}
+knitr::kable(official_list[which(cutree(hcluster_complete_ts, 5) == 3), 1]) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "30%", height = "200px")
+```
+
+```{r hcluster5 songs in cluster4}
+knitr::kable(official_list[which(cutree(hcluster_complete_ts, 5) == 4), 1]) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "30%", height = "200px")
+```
+
+```{r hcluster5 songs in cluster5}
+knitr::kable(official_list[which(cutree(hcluster_complete_ts, 5) == 5), 1]) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "30%", height = "200px")
+```
+
+Again, by analyzing the clusters based on what songs are in each category, I can determine what themes are being implicitly assigned.
+
+* The first cluster contains songs about love featuring: *Wildest Dreams (Taylor's Version)* and *You Are In Love (Taylor's Version)*.
+* The second cluster contains the majority of songs, which are undetected of one particular theme.
+* The third cluster features: *Never Grow Up (Taylor’s Version)*, *The Best Day (Taylor’s Version)*, and *22 (Taylor’s Version)*.
+* The fourth cluster contains some song on pain, featuring: *You’re Losing Me*, *Cold As You*, and *I Knew You Were Trouble (Taylor's Version)*.
+* The fifth cluster features: *Everything Has Changed (Taylor's Version)*, *Shake It Off (Taylor’s Version)*, and *Welcome To New York (Taylor's Version)*. 
+
+Examining the third and fifth cluster, I see a mix of songs about change and reflection in both. Although I initially planned the reflection category to fall more in lines with her reputation and response to self-image/media, I can understand the interpretation of *You’re On Your Own, Kid* as either a change song or reflection song. I will identify the third cluster a change and the fourth cluster as reflection; primarily because *Shake It Off (Taylor’s Version)* is about letting go of negativity and criticism. 
+
+By examining the table of both results, I notice that changing the number of clusters seems to split the 11 songs in the change theme into two new clusters: one with a size of 8 and the other with size 3. I identified above that one of these split clusters could be interpreted as a reflection theme.
+
+#### 6 Clusters?
+Now, lets try this one more time! Let's see what would happen if we cut our tree into 6 clusters.
+```{r tune clusters at 6}
+cutree(hcluster_complete_ts, 6)
+table(cutree(hcluster_complete_ts, 6))
+```
+
+```{r hcluster6 songs in cluster6}
+knitr::kable(official_list[which(cutree(hcluster_complete_ts, 6) == 6), 1]) %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "30%", height = "200px")
+```
+
+The table shows that the clusters from before are remained, but the pain cluster is removed of songs: *I Wish You Would (Taylor’s Version)*, *marjorie*, and *Out Of The Woods (Taylor’s Version)*.  
+
+Since these songs should still be identified in the pain category, **I will select the tuned tree at 5 clusters**, since there will be a cluster for each theme along with the additional undetected bucket. 
+
+```{r fit hclust5}
+hclust5_ts <- cutree(hcluster_complete_ts, 5)
+```
+
+# Model Accuracies
+To compare my models: the K- Means clustering with 4 centers and Hierarchical Agglomerative clustering with 5 clusters, I use the `plotly` package to examine the songs contained in each of the theme per model. I visualize the songs per theme using a bar chart, with a Plotly hover feature that shows the songs placed in each theme. 
+```{r model accuracy visualizations by song, echo = F}
+ggplotly(ggplot(cbind(ts_dfm, kmeans_ts2$cluster), 
+       aes(x = factor(kmeans_ts2$cluster), 
+           fill = factor(kmeans_ts2$cluster), 
+           text = official_list$track_name)) +
+  geom_bar(stat = "count") +
+  scale_x_discrete(limits = c(2, 4, 3, 1), labels = c("Pain", "NA", "Change", "Love")) +
+  scale_fill_manual(limits = c(2, 4, 3, 1), values = c("pink", "navy", "purple", "gray"), name = "Theme", labels = c("Love", "Pain", "Change", "NA")) +
+  theme_minimal() +
+  theme(axis.title.y = element_blank())+
+  labs(title = "K-Means Clustering: Songs per Theme", 
+       x = "Theme"),
+  tooltip = c("text")) %>% 
+  layout(showlegend = F)
+
+ggplotly(ggplot(cbind(ts_dfm, hclust5_ts), 
+       aes(x = factor(hclust5_ts), 
+           fill = factor(hclust5_ts), 
+           text = official_list$track_name)) +
+  geom_bar(stat = "count") +
+  scale_x_discrete(limits = c(1, 4, 3, 5, 2), labels = c("Love", "Reflection", "Change", "NA", "Pain")) +
+  scale_fill_manual(limits = c(1, 4, 3, 5, 2), values = c("pink", "navy", "purple", "gold", "gray"), name = "Theme", labels = c("Love", "Pain", "Change", "Reflection", "NA")) +
+  theme_minimal() +
+  theme(axis.title.y = element_blank())+
+  labs(title = "Hierarchical Clustering: Songs per Theme", 
+       x = "Theme"),
+  tooltip = c("text")) %>% 
+  layout(showlegend = F)
+```
+
+# Results of the Best Model
+One distinct observation is that the Hierarchical clustering is able to interpret a small category for the reflection theme, one in which the K-means clustering ignores. On the other hand, the number of songs in the undistingushed theme is much greater in the Hierarchical clustering than in the K-means clustering- this is due to more songs being identified as love songs in K-means. Another distinct observation is that out of specified themes, the K-means has the greatest size of songs in the love category, while the Hierarchical clustering was able to label more songs into pain than love. 
+
+Some observations between the placement of songs between models:
+
+* *Call It What You Want*, *Cruel Summer*, *Enchanted*, *End Game*, *Hey Stephen*, *Style*, *This Love* is accurately identified as a love song in K-means, but undetected as any theme in hierarchical.
+* *Delicate* is inaccurately identified as a song about pain in K-means but rather unspecified in hierarchical (the song should be placed in the love theme). 
+* *Ronan (Taylor's Version)* and *The Last Time (Taylor's Version)* were accurately defined as a song about pain in K-means, but unspecified in hierarchical. 
+* *Labyrinth* was inaccurately categorized as a song about pain in both algorithms, when it should be classified as a love song. 
+* The majority of songs identified in the love, pain, and change themes in hierarchical are also labelled same in K-means [i.e. the placement of *Would've, Could've, Should've*, *You're Losing Me*, *Wildest Dreams*]
+
+# Conclusion
+Overall, the **K-means clustering** is a better fit to the data because it detects the theme of more songs. I would justify that both models have a similar error rate when it comes to predicting the theme of the song, but the K-means would determine more songs as love or pain rather than keeping it as undetected. The K-means had a size of 109 undetected songs, while Hierarchical had a size of 151 undetected songs. Although Hierarchical was able to produce a somewhat interpretable bucket for reflection, it did not satisfy the original definition for what was to be deemed as reflection/reputation/response-to-media. 
+
+## Challenges
+While we were able to create a model that predicts the theme of Taylor Swift's discography, there were some setbacks that we have to consider. 
+
+1. Our algorithms work on the premise that documents with the same topic have the same dictionary of words and that they are bag-of-word models, meaning that they only consider individual tokens of words, rather than the poetry of the lyrics and how the words are used together. Literary devices that Swift uses such as paradox, humor, or irony will not be captured in our model. 
+
+2. Our dictionary of words is limited. While I was curating my dictionary of words, I extensively looked at the words in songs from various themes so that I could best capture how Swift uses her language for different discussions. I referenced specific songs that I thought well-highlighted a theme: for instance, *Welcome to New York (Taylor's Version)* I would say was overfitted into our dictionary for change, based on the specific word of "new" and "york". In addition, the use of words in different contexts is inevitable- the word "cruel" is used in a love sense in *Cruel Summer* but utilized in a pain sense in *All Too Well (Taylor's Version)* or *Mr. Perfectly Fine (Taylor's Version)*. I chose which dictionary the word would fall into based on which theme of song it fell more into.
+
+3. We are not looking at the entire lyrics. Since we are using Musixmatch's API data, we only had access to the first 30% of the lyrics. As a songwriter, Swift conveys a story in her songs which would explain why the beginning of her song may not necessarily capture the emotional context of the entire track. With the first few lyrics intended towards setting up the narrative or background, it will not capture the entirety of the song's theme. 
+
+## Wrapping Up
+Nonetheless, our K-means cluster was able to detect songs that were strongly about love, pain, and change. This was not a delicate task to ask for our machine to solve: **detecting the theme of a Taylor Swift song based on only the first 30% of the song's lyrical data**. Although it didn't reach the endgame of accurately labeling the themes for all songs, it still accomplished for a select number of songs, all too well. Moving forward, we could look into sentiment analysis in order to study the mood of the songs, which could lead into a more intricate understanding of the theme. Furthermore, incorporating the acousticness or danceability (as provided in Spotify API) could also be a useful feature in determining the mood and possibly theme. All in all, I would say that our project was a success: we had fun and we learned a lot unsupervised! 
+
+## Is It Over Now? 
+Next time you listen to Taylor Swift, take the moment to indulge the poetry and creativity she so eloquently evokes in her mastery, refined songwriting. 
+
+**The Tortured Poets Department** releases April 19! 
+
+```{r image3, echo=FALSE, fig.align='center', out.width='55%'}
+knitr::include_graphics(path = 'ttpd.png')
+```
+
+# Code Appendix
+```{r appendix, ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```

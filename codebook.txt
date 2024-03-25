@@ -1,0 +1,7 @@
+Name / Data Type / Measurement Unit / Description
+-----------------------------
+track_name / nominal / -- / title of song (from Spotify)
+album_name.y / nominal / -- / title of album/single
+track_number / nominal / -- / track number in album/single
+lyrics_body / nominal / -- / first 30% of lyrics of song (from Musixmatch)
+duration_ms / continuous / ms / length of song
