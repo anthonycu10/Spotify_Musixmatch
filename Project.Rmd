@@ -38,14 +38,14 @@ library(tokenizers)
 library(tidyclust)
 library(GGally)
 
-Sys.setenv(SPOTIFY_CLIENT_ID = '90eebf23819f4f6a9a3c6b26f8ebedd2')
-Sys.setenv(SPOTIFY_CLIENT_SECRET = 'b17dc3bbb1744a0f9bb0a5725cbcae07')
+Sys.setenv(SPOTIFY_CLIENT_ID = '13')
+Sys.setenv(SPOTIFY_CLIENT_SECRET = '13')
 
 # spotify access token
 access_token <- get_spotify_access_token()
 
 # musixmatch access token
-api_key <- '86c81cb48352f6946ef78b43cbe61ad9'
+api_key <- '13'
 
 # set seed for dataset previews 
 set.seed(13)
